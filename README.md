@@ -1,45 +1,47 @@
 # mock-craft
 
-CLI **mcraft** — генерация моковых данных (JSON, CSV, SQL) из простой JSON-схемы: ключ → тип поля. Без внешних зависимостей, Node.js 18+.
+**mcraft** is a zero-dependency CLI that generates mock data as **JSON**, **CSV**, or **SQL** from a simple JSON map: field name → type. Requires **Node.js 18+**.
 
-**Репозиторий:** [github.com/harankin92/mock-craft](https://github.com/harankin92/mock-craft)
+**Repository:** [github.com/harankin92/mock-craft](https://github.com/harankin92/mock-craft)
 
-## Установка
+## Install
+
+Global:
 
 ```bash
 npm install -g mock-craft
 ```
 
-Локально в проекте:
+In a project:
 
 ```bash
 npm install mock-craft
 npx mcraft generate -s schema.json
 ```
 
-## Использование
+## Usage
 
 ```bash
 mcraft generate -s <schema.json> [options]
 ```
 
-| Опция | Описание |
-|--------|----------|
-| `-s, --schema <path>` | Путь к JSON-схеме (обязательно) |
-| `-f, --format <type>` | `json` (по умолчанию), `csv`, `sql` |
-| `-c, --count <n>` | Число записей (по умолчанию 10) |
-| `-o, --output <path>` | Файл вывода; без флага — stdout |
-| `-t, --table <name>` | Имя таблицы для SQL (по умолчанию `mock_data`) |
+| Option | Description |
+|--------|-------------|
+| `-s, --schema <path>` | Path to the JSON schema (**required**) |
+| `-f, --format <type>` | `json` (default), `csv`, or `sql` |
+| `-c, --count <n>` | Number of records (default: `10`) |
+| `-o, --output <path>` | Write to file; omit for stdout |
+| `-t, --table <name>` | SQL table name (default: `mock_data`) |
 
-### Пример
+### Example
 
 ```bash
 mcraft generate -s schema.example.json -f csv -c 100 -o users.csv
 ```
 
-## Схема
+## Schema
 
-Объект: имя поля → один из типов: `uuid`, `name`, `email`, `date`, `number`, `address`.
+A plain object: each key is a field name; each value is one of: `uuid`, `name`, `email`, `date`, `number`, `address`.
 
 ```json
 {
@@ -52,9 +54,9 @@ mcraft generate -s schema.example.json -f csv -c 100 -o users.csv
 }
 ```
 
-См. `schema.example.json` в репозитории.
+See `schema.example.json` in this repo.
 
-## Разработка
+## Development
 
 ```bash
 git clone https://github.com/harankin92/mock-craft.git
@@ -62,6 +64,6 @@ cd mock-craft
 node bin/index.js generate -s schema.example.json -c 3 -f json
 ```
 
-## Лицензия
+## License
 
 MIT
