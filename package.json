@@ -20,7 +20,7 @@
     "mcraft"
   ],
   "bin": {
-    "mcraft": "./bin/index.js"
+    "mcraft": "bin/index.js"
   },
   "files": [
     "bin",
