@@ -1,0 +1,8 @@
+{
+  "id": "uuid",
+  "fullName": "name",
+  "contactEmail": "email",
+  "age": "number",
+  "createdAt": "date",
+  "deliveryAddress": "address"
+}

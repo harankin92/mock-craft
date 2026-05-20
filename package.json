@@ -1,0 +1,49 @@
+{
+  "name": "mock-craft",
+  "version": "1.0.0",
+  "description": "Zero-dependency CLI: generate mock JSON/CSV/SQL from a simple JSON field-type map (uuid, name, email, date, number, address).",
+  "type": "module",
+  "license": "MIT",
+  "author": "",
+  "keywords": [
+    "cli",
+    "mock",
+    "mock-data",
+    "test-data",
+    "fixture",
+    "csv",
+    "sql",
+    "json",
+    "schema",
+    "generator",
+    "zero-dependencies",
+    "mcraft"
+  ],
+  "bin": {
+    "mcraft": "./bin/index.js"
+  },
+  "files": [
+    "bin",
+    "dictionaries.js",
+    "formatters.js",
+    "generator.js",
+    "schema.example.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "generate": "node bin/index.js generate",
+    "prepublishOnly": "node bin/index.js generate -s schema.example.json -c 1 -f json > /dev/null"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harankin92/mock-craft.git"
+  },
+  "bugs": {
+    "url": "https://github.com/harankin92/mock-craft/issues"
+  },
+  "homepage": "https://github.com/harankin92/mock-craft#readme"
+}
