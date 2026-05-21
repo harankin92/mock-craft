@@ -1,7 +1,7 @@
 {
   "name": "mock-craft",
-  "version": "2.0.0",
-  "description": "Zero-dependency CLI (v2): mock JSON/CSV/SQL from JSON schema — shorthand or rich configs, nesting (object/array), templates {{placeholders}}, enums, floats, phone, lorem text.",
+  "version": "3.0.0",
+  "description": "Zero-dependency CLI (v3): deterministic seed (Mulberry32), nullChance, _collections + ref, TS types export, HTTP mock server — plus v2 nested schema features.",
   "type": "module",
   "license": "MIT",
   "author": "",
@@ -9,6 +9,7 @@
     "cli",
     "mock",
     "mock-data",
+    "mock-server",
     "test-data",
     "fixture",
     "csv",
@@ -16,6 +17,8 @@
     "json",
     "schema",
     "generator",
+    "seed",
+    "typescript",
     "zero-dependencies",
     "mcraft",
     "nested-json",
@@ -29,14 +32,19 @@
     "dictionaries.js",
     "formatters.js",
     "generator.js",
+    "prng.js",
+    "server.js",
+    "lib/ts-exporter.js",
     "schema.example.json",
     "schema.advanced.example.json",
+    "schema.collections.example.json",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "generate": "node bin/index.js generate",
-    "prepublishOnly": "node bin/index.js generate -s schema.example.json -c 1 -f json > /dev/null && node bin/index.js generate -s schema.advanced.example.json -c 1 -f csv > /dev/null"
+    "serve": "node bin/index.js serve",
+    "prepublishOnly": "node bin/index.js generate -s schema.example.json -c 1 -f json > /dev/null && node bin/index.js generate -s schema.advanced.example.json -c 1 -f csv > /dev/null && node bin/index.js generate -s schema.collections.example.json --seed prepublish-ci -f json > /dev/null && node bin/index.js generate -s schema.collections.example.json --seed prepublish-ci -f sql > /dev/null"
   },
   "engines": {
     "node": ">=18"

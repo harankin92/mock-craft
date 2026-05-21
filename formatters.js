@@ -124,3 +124,34 @@ export function toSql(records, schema, tableName) {
 
   return `${statements.join('\n')}\n`;
 }
+
+/**
+ * Pretty-print multi-collection bundle as JSON (no CSV equivalent).
+ * @param {Record<string, Record<string, unknown>[]>} bundle
+ */
+export function toJsonCollections(bundle) {
+  return `${JSON.stringify(bundle, null, 2)}\n`;
+}
+
+/**
+ * SQL INSERT per collection table name (sanitized identifier).
+ * @param {Record<string, Record<string, unknown>[]>} bundle
+ */
+export function toSqlCollections(bundle) {
+  const statements = [];
+
+  for (const [tableName, rows] of Object.entries(bundle)) {
+    if (!Array.isArray(rows) || rows.length === 0) continue;
+    const columns = Object.keys(rows[0]);
+    const quotedTable = quoteSqlIdentifier(tableName);
+    const quotedCols = columns.map(quoteSqlIdentifier).join(', ');
+    const normalized = normalizeRecordsForColumns(rows, columns);
+
+    for (const row of normalized) {
+      const values = columns.map((col) => sqlFormatScalar(row[col]));
+      statements.push(`INSERT INTO ${quotedTable} (${quotedCols}) VALUES (${values.join(', ')});`);
+    }
+  }
+
+  return `${statements.join('\n')}\n`;
+}

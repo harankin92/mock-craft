@@ -1,0 +1,19 @@
+{
+  "_collections": {
+    "users": {
+      "id": "uuid",
+      "name": "name",
+      "email": "email"
+    },
+    "posts": {
+      "id": "uuid",
+      "title": { "type": "text", "words": 5 },
+      "authorId": {
+        "type": "ref",
+        "collection": "users",
+        "field": "id",
+        "nullChance": 0.05
+      }
+    }
+  }
+}

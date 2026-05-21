@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import {
   cities,
   domains,
@@ -8,11 +7,15 @@ import {
   streetNames,
   streetSuffixes,
 } from './dictionaries.js';
+import { createPrng } from './prng.js';
+
+/** Fixed anchor for `date` so seeded output is identical across runs (no wall clock). */
+const MOCK_REFERENCE_MS = Date.UTC(2024, 5, 15, 12, 0, 0);
 
 /** Maximum nesting depth for object / array (root depth = 0). */
 export const MAX_SCHEMA_DEPTH = 5;
 
-const LEAF_TYPES = new Set([
+const BASE_LEAF_TYPES = new Set([
   'name',
   'email',
   'date',
@@ -29,39 +32,28 @@ const LEAF_TYPES = new Set([
 
 const CONTAINER_TYPES = new Set(['object', 'array']);
 
-const ALL_TYPES = new Set([...LEAF_TYPES, ...CONTAINER_TYPES]);
+/**
+ * @param {boolean} allowRef
+ */
+function allTypesSet(allowRef) {
+  const s = new Set([...BASE_LEAF_TYPES, ...CONTAINER_TYPES]);
+  if (allowRef) s.add('ref');
+  return s;
+}
 
 /**
- * @param {readonly unknown[]} array
+ * @param {unknown} schema
  */
-function getRandomElement(array) {
-  if (!Array.isArray(array) || array.length === 0) {
-    throw new Error('getRandomElement: array must be a non-empty array.');
-  }
-  const index = Math.floor(Math.random() * array.length);
-  return array[index];
-}
-
-function randomIntInclusive(min, max) {
-  const lo = Math.ceil(Math.min(min, max));
-  const hi = Math.floor(Math.max(min, max));
-  return Math.floor(Math.random() * (hi - lo + 1)) + lo;
-}
-
-function buildEmailLocalPartFromFullName(fullName) {
-  const normalized = fullName.trim().toLowerCase();
-  const parts = normalized.split(/\s+/).filter(Boolean);
-
-  let base;
-  if (parts.length >= 2) {
-    base = `${parts[0]}.${parts[parts.length - 1]}`;
-  } else if (parts.length === 1) {
-    base = parts[0];
-  } else {
-    base = 'user';
-  }
-
-  return base.replace(/[^a-z0-9.]/g, '');
+export function isCollectionsSchema(schema) {
+  return (
+    schema !== null &&
+    typeof schema === 'object' &&
+    !Array.isArray(schema) &&
+    '_collections' in schema &&
+    typeof /** @type {{ _collections?: unknown }} */ (schema)._collections === 'object' &&
+    /** @type {{ _collections?: object }} */ (schema)._collections !== null &&
+    !Array.isArray(/** @type {{ _collections?: object }} */ (schema)._collections)
+  );
 }
 
 /**
@@ -101,16 +93,50 @@ export function normalizeSchema(schema) {
 /**
  * @param {Record<string, unknown>} cfg
  * @param {string} path
+ * @param {{ types: Set<string>; collectionNames?: string[]; currentCollection?: string }} meta
  */
-function validateFieldConfig(cfg, path) {
+function validateFieldConfig(cfg, path, meta) {
   const type = cfg.type;
-  if (typeof type !== 'string' || !ALL_TYPES.has(type)) {
+  if (typeof type !== 'string' || !meta.types.has(type)) {
     throw new Error(
-      `${path}: unknown type ${JSON.stringify(type)}. Supported: ${[...ALL_TYPES].sort().join(', ')}`
+      `${path}: unknown type ${JSON.stringify(type)}. Supported: ${[...meta.types].sort().join(', ')}`
     );
   }
 
+  const nc = cfg.nullChance;
+  if (nc !== undefined) {
+    if (typeof nc !== 'number' || nc < 0 || nc > 1 || Number.isNaN(nc)) {
+      throw new Error(`${path}: nullChance must be a number between 0 and 1.`);
+    }
+  }
+
   switch (type) {
+    case 'ref': {
+      const col = cfg.collection;
+      const fld = cfg.field;
+      if (typeof col !== 'string' || !col) {
+        throw new Error(`${path}: ref requires non-empty "collection".`);
+      }
+      if (typeof fld !== 'string' || !fld) {
+        throw new Error(`${path}: ref requires non-empty "field".`);
+      }
+      const names = meta.collectionNames;
+      const cur = meta.currentCollection;
+      if (!names || cur === undefined) {
+        throw new Error(`${path}: ref is only allowed inside "_collections".`);
+      }
+      if (!names.includes(col)) {
+        throw new Error(`${path}: ref references unknown collection "${col}".`);
+      }
+      const ixTarget = names.indexOf(col);
+      const ixSelf = names.indexOf(cur);
+      if (ixTarget >= ixSelf) {
+        throw new Error(
+          `${path}: ref target "${col}" must be declared earlier than "${cur}" in _collections order.`
+        );
+      }
+      break;
+    }
     case 'enum': {
       const values = cfg.values;
       if (!Array.isArray(values) || values.length === 0) {
@@ -142,7 +168,7 @@ function validateFieldConfig(cfg, path) {
         throw new Error(`${path}: object "properties" must not be empty.`);
       }
       for (const k of keys) {
-        validateFieldConfig(normalizeFieldConfig(/** @type {unknown} */ (props[k])), `${path}.${k}`);
+        validateFieldConfig(normalizeFieldConfig(/** @type {unknown} */ (props[k])), `${path}.${k}`, meta);
       }
       break;
     }
@@ -162,7 +188,7 @@ function validateFieldConfig(cfg, path) {
       ) {
         throw new Error(`${path}: array minItems/maxItems must be integers with 0 <= minItems <= maxItems.`);
       }
-      validateFieldConfig(normalizeFieldConfig(cfg.items), `${path}[items]`);
+      validateFieldConfig(normalizeFieldConfig(cfg.items), `${path}[items]`, meta);
       break;
     }
     case 'number': {
@@ -200,9 +226,48 @@ function validateFieldConfig(cfg, path) {
   }
 }
 
+/**
+ * @param {Record<string, unknown>} collections
+ */
+function validateCollectionsShape(collections) {
+  const names = Object.keys(collections);
+  if (names.length === 0) {
+    throw new Error('_collections must define at least one collection.');
+  }
+  const types = allTypesSet(true);
+  for (const name of names) {
+    const inner = collections[name];
+    if (inner === null || typeof inner !== 'object' || Array.isArray(inner)) {
+      throw new Error(`Collection "${name}" must be a plain object schema.`);
+    }
+    const keys = Object.keys(inner);
+    if (keys.length === 0) {
+      throw new Error(`Collection "${name}" must define at least one field.`);
+    }
+    const meta = { types, collectionNames: names, currentCollection: name };
+    for (const k of keys) {
+      try {
+        validateFieldConfig(normalizeFieldConfig(inner[k]), `${name}.${k}`, meta);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(msg);
+      }
+    }
+  }
+}
+
 export function validateSchema(schema) {
   if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) {
-    throw new Error('Schema must be a JSON object with string keys and field configs.');
+    throw new Error('Schema must be a JSON object.');
+  }
+
+  if (isCollectionsSchema(schema)) {
+    const rootKeys = Object.keys(schema);
+    if (rootKeys.length !== 1 || rootKeys[0] !== '_collections') {
+      throw new Error('Multi-schema documents must contain only the "_collections" key at root.');
+    }
+    validateCollectionsShape(/** @type {{ _collections: Record<string, unknown> }} */ (schema)._collections);
+    return;
   }
 
   const keys = Object.keys(schema);
@@ -210,112 +275,134 @@ export function validateSchema(schema) {
     throw new Error('Schema must define at least one field.');
   }
 
+  const meta = { types: allTypesSet(false) };
   for (const key of keys) {
-    let cfg;
     try {
-      cfg = normalizeFieldConfig(schema[key]);
+      validateFieldConfig(normalizeFieldConfig(schema[key]), key, meta);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(`Field "${key}": ${msg}`);
     }
-    validateFieldConfig(cfg, key);
   }
 }
 
 /**
- * @typedef {{ depth: number; lastFullNameForEmail: string | null }} GenCtx
+ * @typedef {{
+ *   depth: number;
+ *   lastFullNameForEmail: string | null;
+ *   rng: ReturnType<typeof createPrng>;
+ *   collections: Record<string, Record<string, unknown>[]>;
+ * }} GenCtx
  */
-
-export const fakeGenerator = {
-  name() {
-    return `${getRandomElement(firstNames)} ${getRandomElement(lastNames)}`;
-  },
-
-  /** @param {string | undefined} fullName */
-  email(fullName) {
-    const sourceName =
-      typeof fullName === 'string' && fullName.trim().length > 0 ? fullName : this.name();
-    const local = buildEmailLocalPartFromFullName(sourceName);
-    const num = randomIntInclusive(1, 9999);
-    const domain = getRandomElement(domains);
-    return `${local}${num}@${domain}`;
-  },
-
-  date() {
-    const now = Date.now();
-    const oneYearMs = 365.25 * 24 * 60 * 60 * 1000;
-    const minAgo = 1 * oneYearMs;
-    const maxAgo = 5 * oneYearMs;
-    const offsetMs = minAgo + Math.random() * (maxAgo - minAgo);
-    return new Date(now - offsetMs).toISOString();
-  },
-
-  /** @param {Record<string, unknown>} [params] */
-  number(params = {}) {
-    const min = typeof params.min === 'number' ? params.min : 1;
-    const max = typeof params.max === 'number' ? params.max : 1000;
-    return randomIntInclusive(min, max);
-  },
-
-  /** @param {Record<string, unknown>} [params] */
-  float(params = {}) {
-    const min = typeof params.min === 'number' ? params.min : 0;
-    const max = typeof params.max === 'number' ? params.max : 100;
-    const fixed = typeof params.fixed === 'number' ? params.fixed : 2;
-    const x = min + Math.random() * (max - min);
-    return Number(x.toFixed(fixed));
-  },
-
-  boolean() {
-    return Math.random() < 0.5;
-  },
-
-  /** @param {Record<string, unknown>} params */
-  enum(params) {
-    const values = params.values;
-    if (!Array.isArray(values) || values.length === 0) {
-      throw new Error('enum.values must be a non-empty array.');
-    }
-    return getRandomElement(values);
-  },
-
-  phone() {
-    const a = randomIntInclusive(100, 999);
-    const b = randomIntInclusive(100, 999);
-    const c = randomIntInclusive(1000, 9999);
-    return `+${a}-${b}-${c}`;
-  },
-
-  /** @param {Record<string, unknown>} [params] */
-  text(params = {}) {
-    const n = typeof params.words === 'number' ? params.words : 10;
-    const parts = [];
-    for (let i = 0; i < n; i += 1) {
-      parts.push(getRandomElement(loremWords));
-    }
-    return parts.join(' ');
-  },
-
-  address() {
-    const number = randomIntInclusive(1, 999);
-    const street = getRandomElement(streetNames);
-    const suffix = getRandomElement(streetSuffixes);
-    const city = getRandomElement(cities);
-    const zip = randomIntInclusive(10000, 99999);
-    return `${number} ${street} ${suffix}, ${city}, ${zip}`;
-  },
-
-  uuid() {
-    return randomUUID();
-  },
-};
 
 /**
- * Resolve {{tags}} in template.format using generator leaf methods (no depth charge).
+ * @param {ReturnType<typeof createPrng>} rng
+ */
+function createFakeGenerators(rng) {
+  function buildEmailLocalPartFromFullName(fullName) {
+    const normalized = fullName.trim().toLowerCase();
+    const parts = normalized.split(/\s+/).filter(Boolean);
+    let base;
+    if (parts.length >= 2) {
+      base = `${parts[0]}.${parts[parts.length - 1]}`;
+    } else if (parts.length === 1) {
+      base = parts[0];
+    } else {
+      base = 'user';
+    }
+    return base.replace(/[^a-z0-9.]/g, '');
+  }
+
+  return {
+    name() {
+      return `${rng.pick(firstNames)} ${rng.pick(lastNames)}`;
+    },
+
+    /** @param {string | undefined} fullName */
+    email(fullName) {
+      const sourceName =
+        typeof fullName === 'string' && fullName.trim().length > 0 ? fullName : this.name();
+      const local = buildEmailLocalPartFromFullName(sourceName);
+      const num = rng.randomIntInclusive(1, 9999);
+      const domain = rng.pick(domains);
+      return `${local}${num}@${domain}`;
+    },
+
+    date() {
+      const oneYearMs = 365.25 * 24 * 60 * 60 * 1000;
+      const minAgo = 1 * oneYearMs;
+      const maxAgo = 5 * oneYearMs;
+      const offsetMs = minAgo + rng.random() * (maxAgo - minAgo);
+      return new Date(MOCK_REFERENCE_MS - offsetMs).toISOString();
+    },
+
+    /** @param {Record<string, unknown>} [params] */
+    number(params = {}) {
+      const min = typeof params.min === 'number' ? params.min : 1;
+      const max = typeof params.max === 'number' ? params.max : 1000;
+      return rng.randomIntInclusive(min, max);
+    },
+
+    /** @param {Record<string, unknown>} [params] */
+    float(params = {}) {
+      const min = typeof params.min === 'number' ? params.min : 0;
+      const max = typeof params.max === 'number' ? params.max : 100;
+      const fixed = typeof params.fixed === 'number' ? params.fixed : 2;
+      const x = min + rng.random() * (max - min);
+      return Number(x.toFixed(fixed));
+    },
+
+    boolean() {
+      return rng.randomBool();
+    },
+
+    /** @param {Record<string, unknown>} params */
+    enum(params) {
+      const values = params.values;
+      if (!Array.isArray(values) || values.length === 0) {
+        throw new Error('enum.values must be a non-empty array.');
+      }
+      return rng.pick(values);
+    },
+
+    phone() {
+      const a = rng.randomIntInclusive(100, 999);
+      const b = rng.randomIntInclusive(100, 999);
+      const c = rng.randomIntInclusive(1000, 9999);
+      return `+${a}-${b}-${c}`;
+    },
+
+    /** @param {Record<string, unknown>} [params] */
+    text(params = {}) {
+      const n = typeof params.words === 'number' ? params.words : 10;
+      const parts = [];
+      for (let i = 0; i < n; i += 1) {
+        parts.push(rng.pick(loremWords));
+      }
+      return parts.join(' ');
+    },
+
+    address() {
+      const num = rng.randomIntInclusive(1, 999);
+      const street = rng.pick(streetNames);
+      const suffix = rng.pick(streetSuffixes);
+      const city = rng.pick(cities);
+      const zip = rng.randomIntInclusive(10000, 99999);
+      return `${num} ${street} ${suffix}, ${city}, ${zip}`;
+    },
+
+    uuid() {
+      return rng.uuidV4();
+    },
+  };
+}
+
+/**
  * @param {Record<string, unknown>} cfg
  * @param {GenCtx} ctx
+ * @param {ReturnType<typeof createFakeGenerators>} gen
  */
-function generateTemplate(cfg, ctx) {
+function generateTemplate(cfg, ctx, gen) {
   const format = /** @type {string} */ (cfg.format);
   const enumPool = cfg.enum_values ?? cfg.values;
 
@@ -323,30 +410,30 @@ function generateTemplate(cfg, ctx) {
     const tag = rawTag.toLowerCase();
     switch (tag) {
       case 'uuid':
-        return fakeGenerator.uuid();
+        return gen.uuid();
       case 'number':
-        return String(fakeGenerator.number({}));
+        return String(gen.number({}));
       case 'float':
-        return String(fakeGenerator.float({}));
+        return String(gen.float({}));
       case 'boolean':
-        return String(fakeGenerator.boolean());
+        return String(gen.boolean());
       case 'enum':
         if (!Array.isArray(enumPool) || enumPool.length === 0) {
           throw new Error('template {{enum}} requires enum_values or values array.');
         }
-        return String(getRandomElement(enumPool));
+        return String(ctx.rng.pick(enumPool));
       case 'phone':
-        return fakeGenerator.phone();
+        return gen.phone();
       case 'text':
-        return fakeGenerator.text({});
+        return gen.text({});
       case 'name':
-        return fakeGenerator.name();
+        return gen.name();
       case 'email':
-        return fakeGenerator.email(ctx.lastFullNameForEmail ?? undefined);
+        return gen.email(ctx.lastFullNameForEmail ?? undefined);
       case 'date':
-        return fakeGenerator.date();
+        return gen.date();
       case 'address':
-        return fakeGenerator.address();
+        return gen.address();
       default:
         throw new Error(`Unsupported template placeholder {{${rawTag}}}.`);
     }
@@ -356,8 +443,14 @@ function generateTemplate(cfg, ctx) {
 /**
  * @param {Record<string, unknown>} cfg
  * @param {GenCtx} ctx
+ * @param {ReturnType<typeof createFakeGenerators>} gen
  */
-function generateField(cfg, ctx) {
+function generateField(cfg, ctx, gen) {
+  const ncRaw = cfg.nullChance;
+  if (typeof ncRaw === 'number' && ncRaw > 0 && ncRaw <= 1 && ctx.rng.random() < ncRaw) {
+    return null;
+  }
+
   const type = /** @type {string} */ (cfg.type);
 
   if (CONTAINER_TYPES.has(type)) {
@@ -367,12 +460,24 @@ function generateField(cfg, ctx) {
   }
 
   switch (type) {
+    case 'ref': {
+      const col = /** @type {string} */ (cfg.collection);
+      const fld = /** @type {string} */ (cfg.field);
+      const rows = ctx.collections[col];
+      if (!Array.isArray(rows) || rows.length === 0) {
+        throw new Error(`ref: collection "${col}" has no rows yet or is missing.`);
+      }
+      const row = ctx.rng.pick(rows);
+      return /** @type {Record<string, unknown>} */ (row)[fld];
+    }
     case 'object': {
       const props = /** @type {Record<string, unknown>} */ (cfg.properties);
       return generateObjectProperties(props, {
         depth: ctx.depth + 1,
         lastFullNameForEmail: ctx.lastFullNameForEmail ?? null,
-      });
+        rng: ctx.rng,
+        collections: ctx.collections,
+      }, gen);
     }
     case 'array': {
       const minItems = typeof cfg.minItems === 'number' ? cfg.minItems : 1;
@@ -385,7 +490,7 @@ function generateField(cfg, ctx) {
       ) {
         throw new Error('array.minItems/maxItems must be integers with 0 <= minItems <= maxItems.');
       }
-      const len = randomIntInclusive(minItems, maxItems);
+      const len = ctx.rng.randomIntInclusive(minItems, maxItems);
       const itemsCfg = normalizeFieldConfig(cfg.items);
       /** @type {unknown[]} */
       const arr = [];
@@ -394,35 +499,37 @@ function generateField(cfg, ctx) {
           generateField(itemsCfg, {
             depth: ctx.depth + 1,
             lastFullNameForEmail: ctx.lastFullNameForEmail ?? null,
-          })
+            rng: ctx.rng,
+            collections: ctx.collections,
+          }, gen)
         );
       }
       return arr;
     }
     case 'template':
-      return generateTemplate(cfg, ctx);
+      return generateTemplate(cfg, ctx, gen);
     case 'name':
-      return fakeGenerator.name();
+      return gen.name();
     case 'email':
-      return fakeGenerator.email(ctx.lastFullNameForEmail ?? undefined);
+      return gen.email(ctx.lastFullNameForEmail ?? undefined);
     case 'date':
-      return fakeGenerator.date();
+      return gen.date();
     case 'number':
-      return fakeGenerator.number(cfg);
+      return gen.number(cfg);
     case 'float':
-      return fakeGenerator.float(cfg);
+      return gen.float(cfg);
     case 'boolean':
-      return fakeGenerator.boolean();
+      return gen.boolean();
     case 'enum':
-      return fakeGenerator.enum(cfg);
+      return gen.enum(cfg);
     case 'phone':
-      return fakeGenerator.phone();
+      return gen.phone();
     case 'text':
-      return fakeGenerator.text(cfg);
+      return gen.text(cfg);
     case 'address':
-      return fakeGenerator.address();
+      return gen.address();
     case 'uuid':
-      return fakeGenerator.uuid();
+      return gen.uuid();
     default:
       throw new Error(`Unsupported type: ${type}`);
   }
@@ -431,16 +538,22 @@ function generateField(cfg, ctx) {
 /**
  * @param {Record<string, unknown>} properties
  * @param {GenCtx} ctx
+ * @param {ReturnType<typeof createFakeGenerators>} gen
  */
-function generateObjectProperties(properties, ctx) {
+function generateObjectProperties(properties, ctx, gen) {
   /** @type {Record<string, unknown>} */
   const result = {};
   let lastName = ctx.lastFullNameForEmail ?? null;
 
   for (const key of Object.keys(properties)) {
     const nc = normalizeFieldConfig(properties[key]);
-    const childCtx = { depth: ctx.depth, lastFullNameForEmail: lastName };
-    result[key] = generateField(nc, childCtx);
+    const childCtx = {
+      depth: ctx.depth,
+      lastFullNameForEmail: lastName,
+      rng: ctx.rng,
+      collections: ctx.collections,
+    };
+    result[key] = generateField(nc, childCtx, gen);
     if (nc.type === 'name' && typeof result[key] === 'string') {
       lastName = /** @type {string} */ (result[key]);
     }
@@ -450,13 +563,26 @@ function generateObjectProperties(properties, ctx) {
 }
 
 /**
+ * @typedef {{ seed?: string }} GenOpts
+ */
+
+/**
+ * Flat table schema → array of rows.
  * @param {Record<string, unknown>} schemaRaw
  * @param {number} count
- * @returns {Array<Record<string, unknown>>}
+ * @param {GenOpts} [opts]
  */
-export function generateRecords(schemaRaw, count) {
+export function generateRecords(schemaRaw, count, opts = {}) {
+  if (isCollectionsSchema(schemaRaw)) {
+    throw new Error('Use generateCollectionsBundle() for schemas with "_collections".');
+  }
+
+  const rng = createPrng(opts.seed);
+  const gen = createFakeGenerators(rng);
   const normalizedTop = normalizeSchema(schemaRaw);
   const keys = Object.keys(normalizedTop);
+  /** @type {Record<string, Record<string, unknown>[]>} */
+  const emptyCollections = {};
   /** @type {Array<Record<string, unknown>>} */
   const records = [];
 
@@ -470,8 +596,10 @@ export function generateRecords(schemaRaw, count) {
       const ctx = /** @type {GenCtx} */ ({
         depth: 0,
         lastFullNameForEmail: lastFullName,
+        rng,
+        collections: emptyCollections,
       });
-      row[key] = generateField(cfg, ctx);
+      row[key] = generateField(cfg, ctx, gen);
       if (cfg.type === 'name' && typeof row[key] === 'string') {
         lastFullName = /** @type {string} */ (row[key]);
       }
@@ -481,4 +609,60 @@ export function generateRecords(schemaRaw, count) {
   }
 
   return records;
+}
+
+/**
+ * @param {{ _collections: Record<string, Record<string, unknown>> }} schemaRoot
+ * @param {number} count
+ * @param {GenOpts} [opts]
+ * @returns {Record<string, Record<string, unknown>[]>}
+ */
+export function generateCollectionsBundle(schemaRoot, count, opts = {}) {
+  if (!isCollectionsSchema(schemaRoot)) {
+    throw new Error('Schema must contain "_collections" object.');
+  }
+
+  const rng = createPrng(opts.seed);
+  const gen = createFakeGenerators(rng);
+  const cols = schemaRoot._collections;
+  const names = Object.keys(cols);
+
+  /** @type {Record<string, Record<string, unknown>[]>} */
+  const bundle = {};
+  /** @type {Record<string, Record<string, unknown>[]>} */
+  const ctxCollections = {};
+
+  for (const name of names) {
+    const normalizedTop = normalizeSchema(cols[name]);
+    const keys = Object.keys(normalizedTop);
+    /** @type {Record<string, unknown>[]} */
+    const records = [];
+
+    for (let i = 0; i < count; i += 1) {
+      /** @type {Record<string, unknown>} */
+      const row = {};
+      let lastFullName = null;
+
+      for (const key of keys) {
+        const cfg = normalizedTop[key];
+        const ctx = /** @type {GenCtx} */ ({
+          depth: 0,
+          lastFullNameForEmail: lastFullName,
+          rng,
+          collections: ctxCollections,
+        });
+        row[key] = generateField(cfg, ctx, gen);
+        if (cfg.type === 'name' && typeof row[key] === 'string') {
+          lastFullName = /** @type {string} */ (row[key]);
+        }
+      }
+
+      records.push(row);
+    }
+
+    bundle[name] = records;
+    ctxCollections[name] = records;
+  }
+
+  return bundle;
 }
