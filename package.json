@@ -1,7 +1,7 @@
 {
   "name": "mock-craft",
-  "version": "1.0.0",
-  "description": "Zero-dependency CLI: generate mock JSON/CSV/SQL from a simple JSON field-type map (uuid, name, email, date, number, address).",
+  "version": "2.0.0",
+  "description": "Zero-dependency CLI (v2): mock JSON/CSV/SQL from JSON schema — shorthand or rich configs, nesting (object/array), templates {{placeholders}}, enums, floats, phone, lorem text.",
   "type": "module",
   "license": "MIT",
   "author": "",
@@ -17,7 +17,9 @@
     "schema",
     "generator",
     "zero-dependencies",
-    "mcraft"
+    "mcraft",
+    "nested-json",
+    "template"
   ],
   "bin": {
     "mcraft": "bin/index.js"
@@ -28,12 +30,13 @@
     "formatters.js",
     "generator.js",
     "schema.example.json",
+    "schema.advanced.example.json",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "generate": "node bin/index.js generate",
-    "prepublishOnly": "node bin/index.js generate -s schema.example.json -c 1 -f json > /dev/null"
+    "prepublishOnly": "node bin/index.js generate -s schema.example.json -c 1 -f json > /dev/null && node bin/index.js generate -s schema.advanced.example.json -c 1 -f csv > /dev/null"
   },
   "engines": {
     "node": ">=18"

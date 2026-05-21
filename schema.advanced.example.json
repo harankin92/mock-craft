@@ -1,0 +1,24 @@
+{
+  "code": {
+    "type": "template",
+    "format": "ID-{{number}}-{{enum}}",
+    "enum_values": ["A", "B", "C"]
+  },
+  "score": { "type": "float", "min": 0, "max": 10, "fixed": 3 },
+  "active": "boolean",
+  "priority": { "type": "enum", "values": ["low", "medium", "high"] },
+  "contactPhone": "phone",
+  "bio": { "type": "text", "words": 12 },
+  "meta": {
+    "type": "object",
+    "properties": {
+      "createdBy": "uuid",
+      "counts": {
+        "type": "array",
+        "items": "number",
+        "minItems": 2,
+        "maxItems": 4
+      }
+    }
+  }
+}
